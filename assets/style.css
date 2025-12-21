@@ -1,0 +1,214 @@
+/* Global Styles */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --primary: #0066cc;
+    --primary-dark: #004c99;
+    --bg-secondary: #f8f9fa;
+    --text-primary: #1f2937;
+    --text-secondary: #4b5563;
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+html,
+body,
+[class*="css"] {
+    font-family: 'Inter', sans-serif;
+    color: var(--text-primary);
+}
+
+/* Titles and Headers */
+h1,
+h2,
+h3 {
+    color: #111827;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+}
+
+h4,
+h5,
+h6 {
+    color: #374151;
+    font-weight: 600;
+}
+
+/* Metric Cards */
+div[data-testid="stMetric"] {
+    background-color: #ffffff;
+    border: 1px solid #e5e7eb;
+    padding: 16px;
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow 0.2s;
+}
+
+div[data-testid="stMetric"]:hover {
+    box-shadow: var(--shadow-md);
+}
+
+div[data-testid="stMetricLabel"] {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+div[data-testid="stMetricValue"] {
+    color: var(--primary);
+    font-weight: 700;
+}
+
+/* Button Styling (General) */
+div.stButton>button {
+    border-radius: 8px;
+    font-weight: 600;
+    border: 1px solid #d1d5db;
+    background-color: white;
+    color: #374151;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease-in-out;
+    padding: 0.5rem 1rem;
+}
+
+div.stButton>button:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background-color: #f0f9ff;
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+/* Primary Button Styling */
+div.stButton>button[kind="primary"] {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+    color: white;
+    border: none;
+    box-shadow: 0 4px 6px rgba(0, 102, 204, 0.2);
+}
+
+div.stButton>button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #0073e6 0%, #005bb7 100%);
+    box-shadow: 0 6px 12px rgba(0, 102, 204, 0.3);
+    color: white;
+}
+
+/* Home Card Styling (Custom HTML classes) */
+.home-card {
+    background-color: white;
+    padding: 2rem;
+    border-radius: 16px;
+    border: 1px solid #e5e7eb;
+    box-shadow: var(--shadow-md);
+    transition: all 0.3s ease;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.home-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-lg);
+}
+
+/* Specific Card Handling via App logic classes */
+/* Forward = Blue/Purple Theme */
+.card-forward {
+    background: linear-gradient(135deg, #f0f7ff 0%, #e0e7ff 100%);
+    border-color: #c7d2fe;
+}
+
+.card-forward:hover {
+    border-color: #6366f1;
+}
+
+.card-forward h3 {
+    color: #1e3a8a;
+    /* Dark Blue */
+}
+
+/* Reverse = Red/Orange Theme */
+.card-reverse {
+    background: linear-gradient(135deg, #fff1f2 0%, #ffe4e6 100%);
+    border-color: #fecdd3;
+}
+
+.card-reverse:hover {
+    border-color: #f43f5e;
+}
+
+.card-reverse h3 {
+    color: #881337;
+    /* Dark Red */
+}
+
+.home-card p {
+    color: #4b5563;
+    margin-bottom: 1.5rem;
+}
+
+/* Specific styling for the Home Page Buttons */
+/* The layout is: empty(1), col1(2), col2(3), empty(4) */
+
+/* Forward Button (Column 2) - Defaults to Primary Blue, but ensuring styling */
+div[data-testid="stColumn"]:nth-of-type(2) div.stButton>button {
+    background: linear-gradient(135deg, #0066cc 0%, #004c99 100%);
+    border: none;
+    box-shadow: 0 4px 6px rgba(0, 102, 204, 0.2);
+}
+
+div[data-testid="stColumn"]:nth-of-type(2) div.stButton>button:hover {
+    box-shadow: 0 6px 12px rgba(0, 102, 204, 0.3);
+}
+
+/* Reverse Button (Column 3) - Red Theme */
+div[data-testid="stColumn"]:nth-of-type(3) div.stButton>button {
+    background: linear-gradient(135deg, #be123c 0%, #9f1239 100%) !important;
+    /* Rose-700 to Rose-800 */
+    color: white !important;
+    border: none !important;
+    box-shadow: 0 4px 6px rgba(190, 18, 60, 0.2);
+}
+
+div[data-testid="stColumn"]:nth-of-type(3) div.stButton>button:hover {
+    background: linear-gradient(135deg, #e11d48 0%, #be123c 100%) !important;
+    box-shadow: 0 6px 12px rgba(190, 18, 60, 0.3);
+    color: white !important;
+}
+
+/* Layout Containers */
+div[data-testid="stVerticalBlock"]>div[style*="flex-direction: column;"]>div[data-testid="stVerticalBlock"] {
+    /* Attempt to target inner blocks for spacing - difficult in Streamlit */
+    gap: 1.5rem;
+}
+
+/* Tabs */
+/* Tabs - Aggressive Styling to Override Streamlit Defaults */
+div[data-testid="stTabs"] button[role="tab"],
+div[data-testid="stTabs"] button[role="tab"] p,
+div[data-testid="stTabs"] button[role="tab"] div {
+    font-weight: 500 !important;
+    color: #4b5563 !important;
+    font-size: 1.5rem !important;
+    /* Force size */
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+    line-height: normal !important;
+}
+
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"],
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] p {
+    color: var(--primary) !important;
+    border-bottom-color: var(--primary) !important;
+}
+
+
+
+/* clean sidebar */
+section[data-testid="stSidebar"] {
+    background-color: #f9fafb;
+    border-right: 1px solid #e5e7eb;
+}
