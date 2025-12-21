@@ -441,10 +441,11 @@ class VQModel:
     Implements the multiple inert gas elimination technique (MIGET)
     recovery of V/Q distributions.
     """
-    def __init__(self, data: InertGasData, n_compartments=50, z_factor=40.0):
+    def __init__(self, data: InertGasData, n_compartments=50, z_factor=40.0, backend="scipy"):
         self.data = data
         self.n = n_compartments
         self.z = z_factor
+        self.backend = backend
         
         # Legacy Binning Logic (VQBOHR Lines 314-321)
         # N=50
@@ -479,12 +480,16 @@ class VQModel:
         
     def solve(self, weight_mode: str = "retention") -> VQDistribution:
         """
-        Recover the V/Q distribution using Ridge Regression with non-negativity constraint.
-        Legacy: SMOOTH subroutine.
+        Recover the V/Q distribution.
         
         Args:
             weight_mode (str): "retention" (default) or "excretion".
         """
+        if self.backend == "jax":
+            # Lazy import to avoid crash if JAX not available BUT fail if requested
+            from . import jax_core
+            return self._solve_jax(weight_mode, jax_core)
+        
         fit_r = (weight_mode.lower() == "retention")
         
         # 1. Setup Kernel Matrix A
@@ -601,6 +606,10 @@ class VQModel:
             if np.sum(q_abs) > 0: q_dist_norm = q_abs / np.sum(q_abs)
             else: q_dist_norm = q_abs
 
+
+            if np.sum(q_abs) > 0: q_dist_norm = q_abs / np.sum(q_abs)
+            else: q_dist_norm = q_abs
+
         # 8. Deadspace / Shunt Calculation (Post-hoc for display)
         
         deadspace_est = 0.0
@@ -674,6 +683,227 @@ class VQModel:
             predicted_excretion=pred_e,
             rss=rss_val
         )
+
+    def _solve_jax(self, weight_mode, jax_core):
+        """
+        Implementation of the solver using JAX backend.
+        """
+        import numpy as np
+        fit_r = (weight_mode.lower() == "retention")
+        
+        # 1. Prepare Matrices (Same logic as Scipy)
+        n_solve_start = 0
+        n_solve_end = self.n - 1 
+        if not fit_r:
+            n_solve_start = 1
+            n_solve_end = self.n
+            
+        n_opt = n_solve_end - n_solve_start
+        n_gases = len(self.data.gas_names)
+        A = np.zeros((n_gases, n_opt))
+        pcs = self.data.solubilities
+        
+        for i in range(n_gases):
+            pc = pcs[i]
+            for idx_opt in range(n_opt):
+                j = n_solve_start + idx_opt
+                vaq = self.vq_ratios[j]
+                val = pc / (pc + vaq) if (pc + vaq) != 0 else 0
+                A[i, idx_opt] = val
+                
+        if fit_r:
+            b = self.data.retention
+            weights = self.data.retention_weights
+        else:
+            b = self.data.excretion
+            weights = self.data.excretion_weights
+            
+        # Weighting
+        A_w = A * weights[:, np.newaxis]
+        b_w = b * weights
+        
+        # Regularization Matrix D
+        # (Construct explicitly for JAX to pass as argument)
+        exch_indices = []
+        for idx_opt in range(n_opt):
+            j = n_solve_start + idx_opt
+            if j > 0 and j < self.n - 1:
+                exch_indices.append(idx_opt)
+                
+        reg_size = len(exch_indices)
+        if reg_size > 2:
+            D_exch = np.zeros((reg_size - 2, n_opt))
+            for k in range(reg_size - 2):
+                 idx1 = exch_indices[k]
+                 idx2 = exch_indices[k+1]
+                 idx3 = exch_indices[k+2]
+                 D_exch[k, idx1] = 1.0
+                 D_exch[k, idx2] = -2.0
+                 D_exch[k, idx3] = 1.0
+            reg_matrix = np.sqrt(self.z) * D_exch
+        else:
+            reg_matrix = np.zeros((0, n_opt)) # Empty
+            
+        # 2. Call JAX Solver
+        # Convert to JAX arrays handled inside jax_core functions implicitly or explicitly?
+        # Typically JAX handles numpy inputs fine.
+        
+        x_sol = jax_core.solve_nnls_jax(A_w, b_w, reg_matrix)
+        x_sol = np.array(x_sol) # Convert back to numpy for processing
+        
+        # 3. Error Analysis (JAX Exclusive feature)
+        # Assume noise level is 1.0 because we already weighted b_w by 1/sigma.
+        # Inside JAX, Sigma_b is Identity if we pre-whitened.
+        # However, jax_core.compute_covariance uses raw b and explicit Sigma.
+        # It's cleaner to pass A_w and b_w, and imply Sigma=I.
+        
+        sigma_measurements = np.ones(n_gases) # Because we already weighted A and b
+        cov_x = jax_core.compute_covariance(A_w, b_w, reg_matrix, x_sol, sigma_measurements)
+        cov_x = np.array(cov_x)
+        
+        # 4. Reconstruction
+        full_dist = np.zeros(self.n)
+        full_sd = np.zeros(self.n) # Standard Error for each bin
+        
+        for idx_opt in range(n_opt):
+            j = n_solve_start + idx_opt
+            full_dist[j] = x_sol[idx_opt]
+            full_sd[j] = np.sqrt(cov_x[idx_opt, idx_opt])
+
+        # Standard Processing
+        qt = self.data.qt_measured
+        ve = self.data.ve_measured
+        
+        if fit_r:
+            q_dist = full_dist
+            v_abs = q_dist * self.vq_ratios
+            
+            total_q = np.sum(q_dist)
+            q_dist_norm = q_dist / total_q if total_q > 0 else q_dist
+            
+            total_v = np.sum(v_abs)
+            v_dist_norm = v_abs / total_v if total_v > 0 else v_abs
+            
+            # Post-hoc Deadspace
+            deadspace_est = 0.0
+            va_total = 0.0
+            if qt > 0 and ve > 0:
+                va_total = qt * np.sum(q_dist_norm * self.vq_ratios)
+                if ve > va_total: deadspace_est = (ve - va_total) / ve
+                
+        else:
+            v_dist = full_dist
+            q_abs = np.zeros_like(v_dist)
+            for j in range(self.n):
+                if self.vq_ratios[j] > 0:
+                    q_abs[j] = v_dist[j] / self.vq_ratios[j]
+            
+            total_v = np.sum(v_dist)
+            v_dist_norm = v_dist / total_v if total_v > 0 else v_dist
+            
+            total_q = np.sum(q_abs)
+            q_dist_norm = q_abs / total_q if total_q > 0 else q_abs
+            
+            deadspace_est = v_dist_norm[-1]
+            if ve > 0: va_total = ve * (1.0 - deadspace_est)
+
+        # 5. Advanced Error Propagation (Moments)
+        # We need to pass the UNNORMALIZED vector to get errors on moments?
+        # Moments usually depend on normalized distribution.
+        # But normalization adds covariance terms.
+        # jax_core.get_moment_errors handles 'q_dist' (which is x_sol in fit_r case).
+        # It handles internal normalization.
+        
+        if fit_r:
+            mean_q_sd, sd_q_sd = jax_core.get_moment_errors(x_sol, self.vq_ratios[n_solve_start : n_solve_start + n_opt], cov_x)
+            # Convert jax arrays to scalar
+            mean_q_sd = float(mean_q_sd)
+            sd_q_sd = float(sd_q_sd)
+        else:
+            mean_q_sd, sd_q_sd = 0.0, 0.0 # TODO: Implement for V-fit
+            
+        # Calc standard moments
+        self.q_mean, self.q_sd = self._calc_moments(q_dist_norm, self.vq_ratios)
+        self.v_mean, self.v_sd = self._calc_moments(v_dist_norm, self.vq_ratios)
+        
+        # Calculate Predicted R/E
+        pred_r = np.zeros(n_gases)
+        pred_e = np.zeros(n_gases)
+        # (Same loop as Scipy)
+        for i in range(n_gases):
+            pc = pcs[i]
+            kernel_r = np.zeros(self.n)
+            for j in range(self.n):
+                vaq = self.vq_ratios[j]
+                r_val = pc / (pc + vaq) if (pc + vaq) != 0 else 0
+                kernel_r[j] = r_val
+            
+            pred_r[i] = np.sum(kernel_r * q_dist_norm)
+            if ve > 0:
+                # Kernel E
+                # pred_e[i] = ...
+                pass # Skip for brevity, similar to above
+        
+        # Fill predicted E properly
+        for i in range(n_gases):
+            pc = pcs[i]
+            cum_e = 0.0
+            for j in range(self.n):
+                vaq = self.vq_ratios[j]
+                r_val = pc / (pc + vaq) if (pc + vaq) != 0 else 0
+                if j == 0: r_val = 1.0 # Shunt
+                # E_i = R_i * VAQ_i * QT / VE
+                term = q_dist_norm[j] * r_val * vaq * (qt / ve) if ve > 0 else 0
+                cum_e += term
+            pred_e[i] = cum_e
+
+        # RSS
+        if fit_r:
+             residuals = (self.data.retention - pred_r) * self.data.retention_weights
+        else:
+             residuals = (self.data.excretion - pred_e) * self.data.excretion_weights
+        rss_val = np.sum(residuals**2)
+
+        # Store Error Metada in the object?
+        # VQDistribution needs update to hold 'shunt_error', 'mean_q_error' etc?
+        # For now, print or just return basics.
+        # User asked for "confidence interval for values of shunt".
+        
+        shunt_val = q_dist_norm[0]
+        shunt_sd = 0.0
+        if fit_r:
+            # Shunt is index 0 of solution vector
+            # But x_sol might be normalized? No, x_sol is Q_i (L/min or similar units).
+            # The Shunt Fraction is x[0] / sum(x).
+            # Error prop for ratio is needed.
+            # Approximation: Error(Shunt_Frac) ~ Error(Shunt_Abs) / Total_Q.
+            shunt_sd = full_sd[0] / (total_q if total_q > 0 else 1.0)
+
+        # Extend VQDistribution class dynamically or add fields?
+        # Python allows dynamic attr.
+        dist_obj = VQDistribution(
+            compartments=self.n,
+            blood_flow=q_dist_norm,
+            ventilation=v_dist_norm,
+            vaq_ratios=self.vq_ratios,
+            shunt=shunt_val,
+            deadspace=deadspace_est,
+            va_total=va_total,
+            mean_q=self.q_mean, 
+            sd_q=self.q_sd,
+            mean_v=self.v_mean,
+            sd_v=self.v_sd,
+            predicted_retention=pred_r,
+            predicted_excretion=pred_e,
+            rss=rss_val
+        )
+        
+        # Attach extras
+        dist_obj.shunt_sd = shunt_sd
+        dist_obj.mean_q_sd = mean_q_sd
+        dist_obj.sd_q_sd = sd_q_sd
+        
+        return dist_obj
 
     def _calc_moments(self, dist, ratios):
         mask = (ratios > 0) & (dist > 0)
