@@ -23,11 +23,12 @@ def render_inverse_problem():
         
         st.subheader("Model Settings")
         weight_mode = st.selectbox("Weighting Mode", ["Retention", "Excretion"], index=0)
-        solver_backend = st.selectbox("Solver Backend", ["Scipy (Legacy)", "JAX (Experimental)"])
-        backend_key = "jax" if "JAX" in solver_backend else "scipy"
         
-        compare_mode = st.checkbox("Compare Backends", value=False)
+        # JAX removed per user request
+        backend_key = "scipy"
+        
         z_factor_override = st.slider("Smoothing (Z)", 1.0, 100.0, 40.0, help="Higher = Smoother")
+
 
     # Main Area Logic
     if not uploaded_file:
@@ -74,11 +75,8 @@ def render_inverse_problem():
     model = VQModel(current_run, z_factor=z_factor_override, backend=backend_key)
     dist = model.solve(weight_mode=weight_mode.lower())
     
-    dist_compare = None
-    if compare_mode:
-        other_backend = "jax" if backend_key == "scipy" else "scipy"
-        model_cmp = VQModel(current_run, z_factor=z_factor_override, backend=other_backend)
-        dist_compare = model_cmp.solve(weight_mode=weight_mode.lower())
+    # Comparison logic removed
+
 
     # --- UI Layout ---
     
@@ -139,29 +137,13 @@ def render_inverse_problem():
             
             # Filled area for better visuals
             ax.fill_between(x_smooth, q_smooth, color='tab:red', alpha=0.1)
-            ax.plot(x_smooth, q_smooth, 'tab:red', linewidth=2, label=f'Perfusion ({backend_key})')
+            ax.plot(x_smooth, q_smooth, 'tab:red', linewidth=2, label='Perfusion')
             
             ax.fill_between(x_smooth, v_smooth, color='tab:blue', alpha=0.1)
-            ax.plot(x_smooth, v_smooth, 'tab:blue', linewidth=2, label=f'Ventilation ({backend_key})')
+            ax.plot(x_smooth, v_smooth, 'tab:blue', linewidth=2, label='Ventilation')
 
-            # Comparison
 
-            if dist_compare:
-                 q_abs_c = dist_compare.blood_flow * current_run.qt_measured
-                 v_abs_c = dist_compare.ventilation * dist_compare.va_total
-                 q_plot_c = q_abs_c[mask]
-                 v_plot_c = v_abs_c[mask]
-                 
-                 spl_q_c = make_interp_spline(x_log, q_plot_c, k=3)
-                 spl_v_c = make_interp_spline(x_log, v_plot_c, k=3)
-                 q_smooth_c = spl_q_c(x_new)
-                 v_smooth_c = spl_v_c(x_new)
-                 q_smooth_c[q_smooth_c < 0] = 0
-                 v_smooth_c[v_smooth_c < 0] = 0
-                 
-                 other_lbl = "JAX" if backend_key == "scipy" else "Scipy"
-                 ax.plot(x_smooth, q_smooth_c, 'tab:red', linestyle='--', alpha=0.6, label=f'Q ({other_lbl})')
-                 ax.plot(x_smooth, v_smooth_c, 'tab:blue', linestyle='--', alpha=0.6, label=f'V ({other_lbl})')
+
 
         else:
             ax.plot(x_plot, q_plot, 'tab:red', marker='o', label='Perfusion')
@@ -228,22 +210,9 @@ def render_inverse_problem():
             ]
         }
         
-        # Add Comparison if enabled
-        if dist_compare:
-            params["Comparison"] = [
-                dist_compare.rss,
-                dist_compare.shunt * 100,
-                dist_compare.deadspace * 100,
-                dist_compare.mean_q,
-                dist_compare.sd_q,
-                dist_compare.mean_v,
-                dist_compare.sd_v
-            ]
-        
         st.table(pd.DataFrame(params).style.format({
-            "Value": "{:.4f}",
-            "Comparison": "{:.4f}"
-        }, subset=["Value", "Comparison"] if dist_compare else ["Value"]))
+            "Value": "{:.4f}"
+        }))
         
         st.markdown("#### Raw Gas Data")
         st.dataframe(pd.DataFrame({
