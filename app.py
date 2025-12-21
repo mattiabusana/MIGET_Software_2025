@@ -61,7 +61,7 @@ def render_home():
             
     # Footer
     st.markdown("---")
-    st.caption("© 2025 MIGET Team | Version 2.0-Modern")
+    st.caption("© 2025 Mattia Busana | Version 1.0.1")
 
 def main():
     # Load Styles
