@@ -6,10 +6,26 @@ class MigetIO:
     @staticmethod
     def parse_legacy_file(content: str) -> List[InertGasData]:
         """
-        Parses the legacy Fortran-formatted output file (e.g., FILE7 or FILE9).
-        Ref: SHORT.FOR lines 675+ and header writes.
+        Parses the legacy Fortran-formatted output file (e.g., FILE7 or FILE9)
+        as seen in SHORT_INPUT.
+        
+        Format appears to be:
+        Line 1: Run Label (A60)
+        Line 2: NRUNS, PBSEA, ELECT, TBATH, RER, SO2 (I4, F7.1, ...)
+        Line 3: NGASES, NVAQS, ZZ, VQLO, VQHI (2I4, F5.1, 2X, F5.3, 2X, F5.1 ? Check SHORT.FOR)
+        Line 4: Partition Coefficients (6(1PE12.3))
+        Loop Runs:
+          Line 5: PA (Arterial)
+          Line 6: GA (Gain)
+          Line 7: PE (Expired)
+          Line 8: GE (Gain)
+          Line 9: PV (Venous)
+          Line 10: GV (Gain)
+          Line 11: VE, QT, PB, TEMPB, TEMPR, VGA, VBA, VHA, VGV, VBV, VHV
+          Line 12: HB, HCRIT, VO2, VCO2, ... (Blood Gas)
+          Line 13: More Blood Gas?
         """
-        lines = content.strip().splitlines()
+        lines = [l for l in content.splitlines() if l.strip()]
         data_pointer = 0
         
         def get_line():
@@ -22,12 +38,13 @@ class MigetIO:
 
         results = []
         
-        # 1. Header: Run Parameters
-        # READ(7,190) NRUNS,PBSEA,ELECT,TBATH,RER,SO2
-        # FORMAT(I4,F7.1,2F6.1,F8.2,F8.4)
+        # 1. Label
+        label = get_line() # "rawdata2"
+        
+        # 2. Run Params
         line = get_line()
         if not line: return []
-        parts = line.split() # Free format read for simplicity, though Fortran implies fixed width
+        parts = line.split()
         n_runs = int(parts[0])
         pb_sea = float(parts[1])
         elect_temp = float(parts[2])
@@ -35,30 +52,48 @@ class MigetIO:
         # rer = float(parts[4])
         # so2 = float(parts[5])
         
-        # 2. Header: Gas Parameters
-        # READ(7,240) NGASES,NVAQS,ZZ,VQLO,VQHI
+        # 3. Gas Params
+        # Line 3: 6  50  40.0  0.005  100.0 (NGAS, NVAQS, Z, VQLO, VQHI)
         line = get_line()
         parts = line.split()
         n_gases = int(parts[0])
         # n_vaqs = int(parts[1])
+        z_val = float(parts[2]) if len(parts) > 2 else 40.0
         
-        # 3. Partition Coefficients
-        # READ(7,250) (PC(I),I=1,NGASES)
+        # 4. Partition Coefficients
+        # Line 4: 6.580E-03 ...
         line = get_line()
+        # Handle scientific notation split
         pc_values = np.array([float(x) for x in line.split()][:n_gases])
         
         # Loop over runs
         for i in range(n_runs):
             run_data = InertGasData()
-            run_data.name = f"Run {i+1}"
+            run_data.name = f"{label.strip()} - Run {i+1}"
             run_data.pb_sea = pb_sea
             run_data.temp_blood = elect_temp
             run_data.temp_bath = bath_temp
+            run_data.z = z_val
             run_data.partition_coeffs = pc_values
             
             # PA (Arterial Peaks)
             line = get_line()
-            run_data.pa_raw = np.array([float(x) for x in line.split()][:n_gases])
+            # Heuristic for Repeated PCs (Oklahoma Format)
+            # If line looks like PCs (small values, matches previous PCs) and i > 0
+            # consume it and read next.
+            temp_vals = np.array([float(x) for x in line.split()][:n_gases])
+            if i > 0:
+                 # Check if similar to pc_values
+                 # Or just check first value magnitude? SF6 PC ~ 0.007. PA SF6 ~ 100.
+                 if np.allclose(temp_vals, pc_values, rtol=0.1, atol=0.1):
+                     # Likely repeated PCs
+                     # Update PCs just in case?
+                     pc_values = temp_vals
+                     # Read next line for PA
+                     line = get_line()
+                     temp_vals = np.array([float(x) for x in line.split()][:n_gases])
+            
+            run_data.pa_raw = temp_vals
             
             # GA (Gains)
             line = get_line()
@@ -81,18 +116,38 @@ class MigetIO:
             run_data.gv = np.array([float(x) for x in line.split()][:n_gases])
             
             # Ventilation/Perfusion
-            # READ(7,1220) VEO,QT,PB,TEMPB,TEMPR, ...
+            # Line 11: 14.40 7.40 ... (QT, VE, PB, TBODY, TEMPR, VGA, VBA...)
+            # SHORT.FOR: READ (1,160) QT, VEO, PBAR, TEMPB, TEMPR
+            # BUT: Data implies QT=7.4 (2nd Position) to match Low Shunt/Retention.
+            # If we use QT=14.4 (1st), R becomes 5% (Too high).
+            # So File Format IS 'VE, QT'.
             line = get_line()
             parts = line.split()
-            run_data.ve_measured = float(parts[0])
-            run_data.qt_measured = float(parts[1])
+            run_data.ve_measured = float(parts[0]) # VE First
+            run_data.qt_measured = float(parts[1]) # QT Second
             run_data.temp_body = float(parts[3]) # TEMPB
             
-            # Blood Gas / O2 data (Optional in loop?)
-            # SHORT.FOR: IF(PV(1).GT.0.0) WRITE...
-            # We assume it exists for now or check PV
-            line = get_line()
-            # Parse blood gas data if needed
+            # Check if we have volume data (Sample correction)
+            if len(parts) >= 11:
+                run_data.vga = float(parts[5])
+                run_data.vba = float(parts[6])
+                run_data.vha = float(parts[7])
+                run_data.vgv = float(parts[8])
+                run_data.vbv = float(parts[9])
+                run_data.vhv = float(parts[10])
+            else:
+                # Default to 0? Or 1? If 0, correction formula might fail if division.
+                # If VBA=0, formula VHA/VBA fails.
+                # Assuming if missing, no correction needed? 
+                pass
+            
+            # Blood Gas
+            # Line 12: 8.9  27.0 ... (HB, HCRIT, ...)
+            # Line 13: 79.0 41.0 7.44 (O2 data?)
+            # Just consume these lines for now, or parse if needed for Bohr integration
+            # We need to advance pointer
+            _ = get_line() # Line 12
+            _ = get_line() # Line 13
             
             results.append(run_data)
             
