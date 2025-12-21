@@ -4,3 +4,4 @@ pandas
 streamlit
 matplotlib
 plotly
+openpyxl
