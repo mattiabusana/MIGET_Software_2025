@@ -11,7 +11,7 @@ from scipy.interpolate import make_interp_spline
 st.set_page_config(page_title="MIGET Modern", layout="wide")
 
 def render_inverse_problem():
-    st.header("Inverse Problem")
+    st.header("Reverse Problem")
     
     st.sidebar.header("Data Input")
     input_method = "File Upload"
@@ -306,7 +306,7 @@ def render_inverse_problem():
         st.write("Please upload a file to begin.")
 
 def render_direct_problem():
-    st.header("Direct Problem")
+    st.header("Forward Problem")
     
     col1, col2 = st.columns(2)
     
@@ -319,25 +319,28 @@ def render_direct_problem():
         ve_sim = st.number_input("Minute Ventilation (VE L/min)", 0.1, 50.0, 6.0, step=0.5)
         
         st.markdown("---")
-        st.markdown("**Perfusion (Q) Modes**")
-        
-        # Primary Mode
-        st.write("**Primary Mode**")
-        q1_mean = st.number_input("Q1 Mean (Linear)", 0.01, 100.0, 1.0, step=0.1, help="Center of main Q distribution")
-        q1_sd = st.number_input("Q1 LogSD", 0.0, 3.0, 0.4, step=0.05, help="Width of main Q distribution")
-        
-        # Secondary Mode
-        st.markdown("---")
+        st.markdown("### Perfusion (Q) Modes")
         use_secondary = st.checkbox("Enable Secondary Mode")
+        
+        col_q1, col_q2 = st.columns(2)
+        
+        with col_q1:
+             st.caption("Primary Mode")
+             q1_mean = st.number_input("Q1 Mean", 0.01, 100.0, 1.0, step=0.1, help="Center (Linear Scale)")
+             q1_sd = st.number_input("Q1 LogSD", 0.0, 3.0, 0.4, step=0.05, help="Dispersion (Log Scale)")
+             
         q2_mean = None
         q2_sd = None
         q2_flow_pct = 0.0
         
-        if use_secondary:
-            st.write("**Secondary Mode**")
-            q2_mean = st.number_input("Q2 Mean (Linear)", 0.01, 100.0, 10.0, step=0.1)
-            q2_sd = st.number_input("Q2 LogSD", 0.0, 3.0, 0.4, step=0.05)
-            q2_flow_pct = st.number_input("Q2 Flow Share (%)", 0.0, 100.0, 5.0, step=0.1, help="Percentage of total body flow in this mode")
+        with col_q2:
+            if use_secondary:
+                st.caption("Secondary Mode")
+                q2_mean = st.number_input("Q2 Mean", 0.01, 100.0, 10.0, step=0.1)
+                q2_sd = st.number_input("Q2 LogSD", 0.0, 3.0, 0.4, step=0.05)
+                q2_flow_pct = st.number_input("Q2 Flow %", 0.0, 100.0, 5.0, step=0.1)
+            else:
+                st.caption("Secondary Mode disabled")
 
     with col2:
         st.subheader("Gas Solubilities")
@@ -432,65 +435,73 @@ def render_direct_problem():
     ax.grid(True, which="both", ls="-", color="#f0f0f0", alpha=0.9)
     st.pyplot(fig)
     
-    # Results Row: Summary Table left, R/E Plot right
-    col_sum, col_re_plot = st.columns([1, 1.5])
-    
-    with col_sum:
-        st.markdown("### Simulation Summary")
-        df_sum = pd.DataFrame([{
-            "Shunt (%)": shunt,
-            "Deadspace (%)": deadspace,
-            "QT (L/min)": qt_sim,
-            "VE (L/min)": ve_sim,
-            "VA (L/min)": va_total_sim
-        }])
-        st.table(df_sum.T.style.format("{:.1f}")) # Transposed for better column fit
-    
-    with col_re_plot:
-        st.subheader("2. Retention & Excretion")
-        fig2, ax2 = plt.subplots(figsize=(6, 4)) # Smaller
-    
-    # Plot Continuous curves?
-    # We only have discrete points for the gases.
-    # To show continuous curve, we'd need to sweep solubility.
-    
-    sweep_sols = np.logspace(-3, 3, 50)
-    sweep_r, sweep_e = fw_model.calculate_re(q_dist, v_dist, ds_frac, sweep_sols)
-    
-    ax2.plot(sweep_sols, sweep_r, '-', color='tab:orange', alpha=0.8, label='Simulated R')
-    ax2.plot(sweep_sols, sweep_e, '-', color='tab:purple', alpha=0.8, label='Simulated E')
-    
-    # Plot Points
-    ax2.plot(solubilities, meas_r, 'o', color='tab:orange', markersize=10, label='Gas R')
-    ax2.plot(solubilities, meas_e, 'o', color='tab:purple', markersize=10, label='Gas E')
-    
-    ax2.set_xscale('log')
-    ax2.set_xlabel('Solubility (ml/dl/torr)')
-    ax2.set_ylabel('R / E')
-    ax2.legend()
-    ax2.grid(True, which="both", ls="-", color="#f0f0f0", alpha=0.9)
-    st.pyplot(fig2)
-    
-    # Data Table
+    # Results Row: Plot left, Summary Table right (Matching Inverse Problem)
+    # Define df_out early for download button
     df_out = pd.DataFrame({
         "Gas": std_names,
         "Solubility": solubilities,
         "Retention (R)": meas_r,
         "Excretion (E)": meas_e
     })
-    st.table(df_out.style.format({
-        "Solubility": "{:.4f}",
-        "Retention (R)": "{:.4f}",
-        "Excretion (E)": "{:.4f}"
-    }))
+
+    col_re_plot, col_sum = st.columns([1, 1])
     
-    # Download
-    st.download_button(
-         label="Download Simulated Data (CSV)",
-         data=df_out.to_csv(index=False).encode('utf-8'),
-         file_name="simulated_miget_data.csv",
-         mime='text/csv'
-    )
+    with col_re_plot:
+        st.write("#### Retention & Excretion Fit")
+        fig2, ax2 = plt.subplots(figsize=(6, 5)) # Matching Inverse Problem size
+        
+        # Plot Continuous curves?
+        # We only have discrete points for the gases.
+        # To show continuous curve, we'd need to sweep solubility.
+        
+        sweep_sols = np.logspace(-3, 3, 50)
+        sweep_r, sweep_e = fw_model.calculate_re(q_dist, v_dist, ds_frac, sweep_sols)
+        
+        ax2.plot(sweep_sols, sweep_r, '-', color='tab:orange', alpha=0.8, label='Simulated R')
+        ax2.plot(sweep_sols, sweep_e, '-', color='tab:purple', alpha=0.8, label='Simulated E')
+        
+        # Plot Points
+        ax2.plot(solubilities, meas_r, 'o', color='tab:orange', markersize=10, label='Gas R')
+        ax2.plot(solubilities, meas_e, 'o', color='tab:purple', markersize=10, label='Gas E')
+        
+        ax2.set_xscale('log')
+        ax2.set_xlabel('Solubility (ml/dl/torr)')
+        ax2.set_ylabel('R / E')
+        ax2.legend()
+        ax2.grid(True, which="both", ls="-", color="#f0f0f0", alpha=0.9)
+        st.pyplot(fig2)
+        
+    with col_sum:
+        st.write("#### Parameters")
+        df_sum_dict = {
+            "Shunt (%)": shunt,
+            "Deadspace (%)": deadspace,
+            "QT (L/min)": qt_sim,
+            "VE (L/min)": ve_sim,
+            "VA (L/min)": va_total_sim
+        }
+        
+        df_disp = pd.DataFrame({
+            "Parameter": list(df_sum_dict.keys()),
+            "Value": list(df_sum_dict.values())
+        })
+        st.table(df_disp.style.format({"Value": "{:.1f}"}))
+        
+        st.markdown("---")
+        # Download Button (Moved here to match Inverse Problem)
+        st.download_button(
+             label="Download Simulated Data (CSV)",
+             data=df_out.to_csv(index=False).encode('utf-8'),
+             file_name="simulated_miget_data.csv",
+             mime='text/csv'
+        )
+    
+    # Data Table
+    
+    # Data Table
+    # Data Table removed to match Inverse Problem layout
+    
+    # Download logic moved to summary column
 
 def main():
     if 'mode' not in st.session_state:
@@ -538,14 +549,14 @@ def main():
         
         with col1:
              # Regular button but styled by the above CSS targeting this column
-            if st.button("⬅️ Inverse Problem", key="inv_btn"):
-                st.session_state['mode'] = 'inverse'
+            if st.button("Forward Problem ➡️", key="dir_btn"):
+                st.session_state['mode'] = 'direct'
                 st.rerun()
                 
         with col2:
             # Regular button but styled by the above CSS targeting this column
-            if st.button("➡️ Direct Problem", key="dir_btn"):
-                st.session_state['mode'] = 'direct'
+            if st.button("⬅️ Reverse Problem", key="inv_btn"):
+                st.session_state['mode'] = 'inverse'
                 st.rerun()
                 
     elif st.session_state['mode'] == 'inverse':
