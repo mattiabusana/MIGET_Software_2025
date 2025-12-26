@@ -38,8 +38,8 @@ def render_direct_problem():
                 st.divider()
 
                 st.markdown("##### Global Settings")
-                shunt = st.slider("Shunt (%)", 0.0, 100.0, 5.0, step=0.1)
-                deadspace = st.slider("Deadspace (%)", 0.0, 100.0, 30.0, step=0.1)
+                shunt = st.slider("Shunt (%)", 0.0, 100.0, 1.0, step=0.1)
+                deadspace = st.slider("Deadspace (%)", 0.0, 100.0, 25.0, step=0.1)
                 qt_sim = st.slider("Cardiac Output (L/min)", 0.1, 20.0, 5.0, step=0.1)
                 ve_sim = st.slider("Minute Ventilation (L/min)", 0.1, 50.0, 6.0, step=0.5)
                 
@@ -82,6 +82,31 @@ def render_direct_problem():
                     q2_flow_pct = st.slider("Q2 Flow %", 0.0, 100.0, 5.0, step=0.1)
 
 
+                # --- Blood Gas & Diffusion Section ---
+                with st.expander("Blood Gas & Diffusion", expanded=False):
+                    st.caption("Physiological Parameters")
+                    vo2_sim = st.number_input("VO2 (ml/min)", value=250.0, step=10.0)
+                    vco2_sim = st.number_input("VCO2 (ml/min)", value=200.0, step=10.0)
+                    hb_sim = st.number_input("Hemoglobin (g/dL)", value=15.0, step=0.5)
+                    temp_sim = st.number_input("Temperature (C)", value=37.0, step=0.1)
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        fio2_sim = st.number_input("FiO2 (%)", value=21.0, step=1.0)
+                    with c2:
+                        pb_sim = st.number_input("PB (Torr)", value=760.0, step=10.0)
+                        
+                    # Calculate PIO2 (Assuming PH2O = 47 at 37C)
+                    pio2_sim = (fio2_sim / 100.0) * (pb_sim - 47.0)
+                    st.caption(f"Calculated PIO2: {pio2_sim:.1f} Torr")
+                    
+                    st.divider()
+                    enable_diffusion = st.checkbox("Enable Diffusion Limitation (Bohr)", value=False)
+                    dlo2_sim = 9000.0
+                    if enable_diffusion:
+                        dlo2_sim = st.number_input("DLO2 (ml/min/Torr)", value=25.0, step=1.0, help="Lung Diffusion Capacity for Oxygen")
+
+
         # Calculation Logic
         fw_model = VQForwardModel()
         
@@ -99,7 +124,140 @@ def render_direct_problem():
         
         q_abs_total = q_dist * qt_sim
         va_total_sim = ve_sim * (1.0 - deadspace / 100.0)
-        v_abs_total = v_dist * va_total_sim
+        
+        # v_dist sums to (1 - deadspace_pct/100).
+        # So multipying by VE gives correct Comportmental Ventilation summing to VA.
+        v_abs_total = v_dist * ve_sim
+        
+        # --- Bohr / Blood Gas Calculation ---
+        bohr_res = None
+        if True: # Always run blood gas if inputs exist
+            from miget.core import VQDistribution, InertGasData
+            from miget.physiology import BloodGasParams, blood_gas_calc, inverse_blood_gas_calc
+            from miget.bohr import BohrIntegrator
+            
+            # Calculate Effective VA/Q Ratios based on current VE/QT/Deadspace
+            # Because Deadspace changes VA, the actual VA/Q of a compartment receiving X% of V and Y% of Q changes.
+            if qt_sim > 1e-4:
+                 # vaq_i = (v_dist[i] * va_total_sim) / (q_dist[i] * qt_sim)
+                 # Handle cases where q_dist is 0.
+                 # If q_dist[i] is 0, VA/Q is infinite (Deadspace).
+                 # If v_dist[i] is 0, VA/Q is 0 (Shunt).
+                 
+                 # Initialize with bin centers as fallback/scale
+                 vaq_effective = np.zeros_like(fw_model.vq_ratios)
+                 
+                 for k in range(len(vaq_effective)):
+                     q_k = q_dist[k]
+                     v_k = v_dist[k]
+                     
+                     if q_k > 1e-9:
+                         # v_k is fraction of VE * (1-DS). 
+                         # So to get Absolute VA, we multiply v_k * VE? 
+                         # Wait. v_dist sums to (1-DS).
+                         # Absolute Compartment Ventilation = v_k * VE.
+                         # (Sum of Abs Comp Vent = (1-DS) * VE = VA Total). Correct.
+                         
+                         vaq_effective[k] = (v_k * ve_sim) / (q_k * qt_sim)
+                     else:
+                         vaq_effective[k] = fw_model.vq_ratios[k] # Fallback or Infinite
+            else:
+                 vaq_effective = fw_model.vq_ratios
+            
+            # Construct VQ object
+            vq_obj = VQDistribution(
+                compartments=50,
+                blood_flow=q_dist,
+                ventilation=v_dist,
+                vaq_ratios=vaq_effective
+            )
+            
+            # Data object (mocking what Bohr needs)
+            # Bohr needs qt_measured.
+            data_obj = InertGasData(qt_measured=qt_sim, ve_measured=ve_sim)
+            
+            # Params
+            bg_params = BloodGasParams(hb=hb_sim, temp=temp_sim)
+            # Note: We need PIO2 passed? BohrIntegrator in bohr.py currently hardcodes 150.0 inside solve_compartment_gas_lines
+            # START_BUG_FIX: Pass PIO2 to BohrIntegrator or Params? 
+            # Plan: Modify bohr.py to accept PIO2 in data or params, OR just hack it here by monkeypatching?
+            # Better: bohr.py assumed standard air. I should fix bohr.py to use data.pio2 ideally. 
+            # But let's check bohr.py. Line 117: `pio2 = 150.0 # Placeholder`
+            # I will need to update bohr.py to allow dynamic PIO2. 
+            # For now, let's assume 150.0 or if the user changed it, wait... 
+            # I will do a quick patch injection or update bohr.py later. 
+            # Actually, `InertGasData` doesn't strictly field pio2.
+            # I'll update bohr.py in next step. Direct.py continues...
+            
+            integrator = BohrIntegrator(vq_obj, data_obj, bg_params, dlo2=dlo2_sim)
+            # Inject PIO2 (Hack for now until bohr.py update)
+            integrator.pio2 = pio2_sim 
+            
+            # Find Pv
+            pvo2_calc, pvco2_calc = integrator.find_mixed_venous(vo2_sim, vco2_sim)
+            
+            # Calculate Arterial P
+            # We need to sum up arterial content -> P
+            qt = qt_sim
+            total_o2_content = 0.0
+            total_co2_content = 0.0
+            
+            # Shunt contribution
+            # q_dist includes shunt at index 0 (if shunt > 0).
+            # We iterate through all compartments, so we don't need to add shunt manually.
+            # We just need to handle vaq=0 correctly in the loop.
+            
+            cvo2_val, cvco2_val = blood_gas_calc(pvo2_calc, pvco2_calc, bg_params)
+            
+            # ----------------------------------------------------------------
+            # VECTORIZED SOLUTION (High Performance)
+            # ----------------------------------------------------------------
+            
+            # 1. Solve all compartments at once for P
+            # Returns arrays for PA and Pc' (End Capillary)
+            pa_o2_all, pa_co2_all, pc_o2_all, pc_co2_all = integrator.solve_all_compartments_gas_lines(
+                vaq_effective, pvo2_calc, pvco2_calc, cvo2_val, cvco2_val
+            )
+            
+            # 2. Convert Pc' (End Capillary Pressure) to Content
+            cc_o2_all, cc_co2_all = blood_gas_calc(pc_o2_all, pc_co2_all, bg_params)
+            
+            # 3. Calculate Weighting Factors (Flow and Ventilation)
+            # q_dist is fractional flow distribution (sums to 1.0)
+            # absolute flow = q_dist * qt
+            
+            flow_abs = q_dist * qt
+            vent_abs = flow_abs * vaq_effective # V = Q * VA/Q
+            
+            # 4. Calculate Arterial Content (Flow Weighted Sum)
+            total_o2_content = np.sum(flow_abs * cc_o2_all)
+            total_co2_content = np.sum(flow_abs * cc_co2_all)
+            
+            art_o2_content = total_o2_content / qt
+            art_co2_content = total_co2_content / qt
+
+            from miget.physiology import inverse_blood_gas_calc
+            pa_art_o2, pa_art_co2 = inverse_blood_gas_calc(art_o2_content, art_co2_content, bg_params)
+
+            # 5. Calculate Mean Alveolar PO2 (Ventilation Weighted Sum)
+            # Mask out shunt/undef ventilation to be safe (though V=0 there)
+            mean_palv_o2 = pio2_sim # Default if no ventilation
+            
+            total_vent = np.sum(vent_abs)
+            if total_vent > 1e-6:
+                mean_palv_o2 = np.sum(vent_abs * pa_o2_all) / total_vent
+            else:
+                mean_palv_o2 = pio2_sim
+            
+            bohr_res = {
+                "PaO2": pa_art_o2,
+                "PaCO2": pa_art_co2,
+                "PvO2": pvo2_calc,
+                "PvCO2": pvco2_calc,
+                "AaDO2": mean_palv_o2 - pa_art_o2,
+                "DLO2": dlo2_sim
+            }
+
         
         # --- RIGHT COLUMN: RESULTS ---
         with col_res:
@@ -113,7 +271,21 @@ def render_direct_problem():
             m4.metric("DeadSp", f"{deadspace:.1f}%")
             m5.metric("VA", f"{va_total_sim:.1f}")
             
+            # Blood Gas Prediction
+            if bohr_res:
+                st.markdown("#### 0. Blood Gas Prediction")
+                bg1, bg2, bg3, bg4 = st.columns(4)
+                bg1.metric("PaO2", f"{bohr_res['PaO2']:.1f}", help="Arterial PO2 (Torr)")
+                bg2.metric("PaCO2", f"{bohr_res['PaCO2']:.1f}", help="Arterial PCO2 (Torr)")
+                bg3.metric("A-a DO2", f"{bohr_res['AaDO2']:.1f}", help="Alveolar-Arterial Gradient")
+                
+                if enable_diffusion and dlo2_sim < 100:
+                    bg4.metric("DLO2", f"{dlo2_sim:.1f}", delta="-Diffusion Limited" if dlo2_sim < 25 else "Normal")
+                else:
+                    bg4.metric("PvO2", f"{bohr_res['PvO2']:.1f}")
+                
             # Row 1: V/Q Plot
+
             st.markdown("#### 1. Constructed V/Q Distribution")
             
             # Plotting styling

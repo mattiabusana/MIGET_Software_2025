@@ -141,13 +141,25 @@ class MigetIO:
                 # Assuming if missing, no correction needed? 
                 pass
             
-            # Blood Gas
-            # Line 12: 8.9  27.0 ... (HB, HCRIT, ...)
-            # Line 13: 79.0 41.0 7.44 (O2 data?)
-            # Just consume these lines for now, or parse if needed for Bohr integration
-            # We need to advance pointer
-            _ = get_line() # Line 12
-            _ = get_line() # Line 13
+            # Blood Gas & Physiology
+            # Line 12: 8.9  27.0 274.9 241.0 ... (HB, HCRIT, VO2, VCO2)
+            # Try to parse Line 12
+            line = get_line()
+            if line:
+                try:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        run_data.hb = float(parts[0])
+                        run_data.hcrit = float(parts[1])
+                    if len(parts) >= 4:
+                        run_data.vo2_measured = float(parts[2])
+                        run_data.vco2_measured = float(parts[3])
+                except ValueError:
+                    pass # Keep defaults if parse error
+            
+            # Line 13: 79.0 41.0 7.44 ... (Measured Pxa, Pxv, etc?)
+            # Currently unused, just consume
+            _ = get_line()
             
             results.append(run_data)
             

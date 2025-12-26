@@ -57,6 +57,12 @@ class InertGasData:
     ve_measured: float = 0.0 # Minute Ventilation (L/min)
     qt_measured: float = 0.0 # Cardiac Output (L/min)
     
+    # Measured Blood Gas / Physiology (From File)
+    vo2_measured: float = 0.0 # mL/min
+    vco2_measured: float = 0.0 # mL/min
+    hb: float = 15.0 # g/dL
+    hcrit: float = 45.0 # %
+    
     # Sampling Volumes (Headspace Correction)
     vga: float = 0.0 # Vol Gas Arterial
     vba: float = 0.0 # Vol Blood Arterial

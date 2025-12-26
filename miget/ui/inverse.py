@@ -6,6 +6,8 @@ import io
 from scipy.interpolate import make_interp_spline
 from miget.io import MigetIO
 from miget.core import VQModel
+from miget.bohr import BohrIntegrator
+from miget.physiology import BloodGasParams
 
 def render_inverse_problem():
     st.header("Reverse Problem")
@@ -28,6 +30,8 @@ def render_inverse_problem():
         backend_key = "scipy"
         
         z_factor_override = st.slider("Smoothing (Z)", 1.0, 100.0, 40.0, help="Higher = Smoother")
+        
+
 
 
     # Main Area Logic
@@ -71,6 +75,42 @@ def render_inverse_problem():
         
     current_run = data[selected_idx]
     
+    # Render Physiology sidebar (Now that we have current_run)
+    with st.sidebar:
+        st.divider()
+        with st.expander("Physiology & Diffusion", expanded=True):
+            st.caption("Parameters for Blood Gas Prediction")
+            
+            # Defaults from Data (if available)
+            def_vo2 = current_run.vo2_measured if current_run.vo2_measured > 0 else 250.0
+            def_vco2 = current_run.vco2_measured if current_run.vco2_measured > 0 else 200.0
+            def_hb = current_run.hb if current_run.hb > 0 else 15.0
+            def_temp = current_run.temp_body if current_run.temp_body > 0 else 37.0
+            
+            vo2_sim = st.number_input("VO2 (ml/min)", value=float(def_vo2), step=10.0, disabled=True)
+            vco2_sim = st.number_input("VCO2 (ml/min)", value=float(def_vco2), step=10.0, disabled=True)
+            hb_sim = st.number_input("Hemoglobin (g/dL)", value=float(def_hb), step=0.5, disabled=True)
+            temp_sim = st.number_input("Temperature (C)", value=float(def_temp), step=0.1, disabled=True)
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                # FiO2 might not be in file? Leave enabled for now unless sure?
+                # The user said "parameters" generally. 
+                # But without FiO2 in file, user is stuck.
+                # Assuming FiO2 is experimental setting allowed to change?
+                # Or assume 21%?
+                fio2_sim = st.number_input("FiO2 (%)", value=21.0, step=1.0) 
+            with c2:
+                # Default to measured PB if available, else 760
+                default_pb = current_run.pb_sea if current_run.pb_sea > 0 else 760.0
+                pb_sim = st.number_input("PB (Torr)", value=float(default_pb), step=10.0, disabled=True)
+            
+            dlo2_sim = st.number_input("DLO2 (ml/min/Torr)", value=25.0, step=1.0, help="Diffusion Capacity")
+            
+            # Derived PIO2
+            pio2_sim = (fio2_sim / 100.0) * (pb_sim - 47.0)
+            st.caption(f"Calculated PIO2: {pio2_sim:.1f} mmHg")
+
     # 2. Solver Execution
     model = VQModel(current_run, z_factor=z_factor_override, backend=backend_key)
     dist = model.solve(weight_mode=weight_mode.lower())
@@ -213,6 +253,115 @@ def render_inverse_problem():
         st.table(pd.DataFrame(params).style.format({
             "Value": "{:.4f}"
         }))
+        
+        # --- PREDICTED BLOOD GASES (BOHR) ---
+        st.markdown("#### Predicted Blood Gases (Bohr Integration)")
+        
+        # 1. Run Bohr Integration
+        # We need to construct a BohrIntegrator with the recovered distribution.
+        # Ensure we have the necessary params from Sidebar
+        
+        # We need to compute BloodGasParams object
+        bg_params = BloodGasParams(
+            hb=hb_sim,
+            temp=temp_sim,
+            # pio2 removed - it is an environmental param pass to Integrator
+            # pico2 removed
+            # Constants
+            sol_o2=0.003, # Default
+            # sol_co2=0.06, # Default
+            dp50=26.8,     # Default (Note param name is dp50 not p50)
+            # acid_base_excess=0.0 # Not in class
+        )
+        
+        # Create Integrator
+        # Note: BohrIntegrator expects vq_dist to be VQDistribution object.
+        # dist IS a VQDistribution object.
+        
+        # Update Data object with VO2/VCO2 for the integrator
+        # (It uses them for Mixed Venous iteration)
+        # We don't want to mutate the persistent data object if we can avoid it, 
+        # but BohrIntegrator might read from it.
+        # Actually BohrIntegrator takes `data` in init.
+        
+        # Create a proxy data object or update current
+        # Let's clone relevant fields
+        from copy import copy
+        bohr_data = copy(current_run)
+        bohr_data.vo2_measured = vo2_sim
+        bohr_data.vco2_measured = vco2_sim
+        bohr_data.qt_measured = qt_sim if 'qt_sim' in locals() else current_run.qt_measured # Use measured or override?
+        # Note: current_run.qt_measured is measured.
+        # For prediction we should use the same QT as the inert gas solution unless overriden?
+        # The V/Q fit used qt_measured. So we should use it.
+        
+        integrator = BohrIntegrator(dist, bohr_data, bg_params, dlo2=dlo2_sim, pio2=pio2_sim)
+        
+        try:
+            with st.spinner("Calculating Blood Gases..."):
+                # 1. Find Mixed Venous
+                pvo2_pred, pvco2_pred = integrator.find_mixed_venous(vo2_sim, vco2_sim)
+                
+                # 2. Calculate Arterial Content (Accounting for DLO2)
+                # We use the JIT solver pipeline
+                from miget.physiology import blood_gas_calc, inverse_blood_gas_calc
+                
+                # Need Cvo2 for solver
+                cvo2_pred, cvco2_pred = blood_gas_calc(pvo2_pred, pvco2_pred, bg_params)
+                
+                # Solve Forward
+                pa_o2_all, pa_co2_all, pc_o2_all, pc_co2_all = integrator.solve_all_compartments_gas_lines(
+                    dist.vaq_ratios, pvo2_pred, pvco2_pred, cvo2_pred, cvco2_pred
+                )
+                
+                # Calculate Mixed Arterial Content
+                # Sum (Flow_frac * Content)
+                # dist.blood_flow is normalized?
+                # VQDistribution.blood_flow sums to (1-shunt) usually in core?
+                # No, look at `solve`: `q_dist_norm` sums to 1.
+                # `shunt` is q_dist_norm[0].
+                # So `dist.blood_flow` includes shunt at index 0.
+                # Does `pc_o2_all` include shunt?
+                # Yes, `solve_all` returns sizes N.
+                # Shunt index 0 has `Pc = Pv` (after my fix).
+                
+                cc_o2_all, cc_co2_all = blood_gas_calc(pc_o2_all, pc_co2_all, bg_params)
+                
+                art_o2_c = np.sum(dist.blood_flow * cc_o2_all)
+                art_co2_c = np.sum(dist.blood_flow * cc_co2_all)
+                
+                # Inverse to get PaO2
+                pao2_pred, paco2_pred = inverse_blood_gas_calc(art_o2_c, art_co2_c, bg_params)
+                
+                # AaDO2
+                # Calculate Ideal PAO2 (Alveolar Gas Equation)
+                # PAO2 = PIO2 - PCO2/R + ...
+                # Use simple approx or full?
+                # R = VCO2/VO2
+                rq = vco2_sim / vo2_sim if vo2_sim > 0 else 0.8
+                
+                # Use True Mean Alveolar PO2 for robust AaDO2
+                # Mean PAO2 = Sum(Vent * PA_i) / Total Vent
+                # Check normalized ventilation
+                
+                if np.sum(dist.ventilation) > 0:
+                     mean_pa_o2 = np.sum(dist.ventilation * pa_o2_all) / np.sum(dist.ventilation)
+                else:
+                     mean_pa_o2 = pio2_sim - paco2_pred/rq # Fallback
+                     
+                aado2 = mean_pa_o2 - pao2_pred
+                
+                # Display Results
+                bg_cols = st.columns(3)
+                bg_cols[0].metric("Predicted PaO2", f"{pao2_pred:.1f} mmHg")
+                bg_cols[1].metric("Predicted PaCO2", f"{paco2_pred:.1f} mmHg")
+                bg_cols[2].metric("AaDO2", f"{aado2:.1f} mmHg")
+                
+                st.caption(f"Mixed Venous: PvO2={pvo2_pred:.1f}, PvCO2={pvco2_pred:.1f}")
+                
+        except Exception as e:
+            st.error(f"Blood Gas Calculation Failed: {e}")
+
         
         st.markdown("#### Raw Gas Data")
         st.dataframe(pd.DataFrame({

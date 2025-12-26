@@ -1,5 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
+from typing import Tuple
 
 @dataclass
 class BloodGasParams:
@@ -65,14 +66,19 @@ def calculate_saturation(po2: float, pco2: float, ph: float, params: BloodGasPar
     a6 = 2396.167
     a7 = -67.10441
 
-    if po2 < 0: po2 = 0
+    po2 = np.maximum(po2, 0.0)
     
     # Virtual PO2 (correction for temp, pH, PCO2)
     # Note: Legacy p50 correction: X = 26.8 * X / (26.8 + DP50)
     
     temp_diff = 37.0 - params.temp
     ph_diff = ph - 7.4
-    pco2_term = 0.06 * np.log10(40.0 / pco2) if pco2 > 0 else 0
+    
+    # Safe log for PCO2
+    pco2_safe = np.maximum(pco2, 1e-6)
+    pco2_term = 0.06 * np.log10(40.0 / pco2_safe)
+    # If original pco2 <= 0, we can zero out the term or handle it. 
+    # But usually PCO2 > 0 in simulation.
     
     x = po2 * (10.0 ** (0.024 * temp_diff + 0.4 * ph_diff + pco2_term))
     
@@ -80,13 +86,16 @@ def calculate_saturation(po2: float, pco2: float, ph: float, params: BloodGasPar
     # Standard P50 is 26.8 in this model?
     x = 26.8 * x / (26.8 + params.dp50)
     
-    if x < 10.0:
-        sat = 0.003683 * x + 0.000584 * x * x
-    else:
-        # Kelman equation
-        num = x * (x * (x * (x + a3) + a2) + a1)
-        den = x * (x * (x * (x + a7) + a6) + a5) + a4
-        sat = num / den
+    # Vectorized check for x < 10.0
+    sat_low = 0.003683 * x + 0.000584 * x * x
+    
+    # Kelman equation high
+    num = x * (x * (x * (x + a3) + a2) + a1)
+    den = x * (x * (x * (x + a7) + a6) + a5) + a4
+    # protect den=0? a4 is huge 935960, unlikely to be 0
+    sat_high = num / den
+    
+    sat = np.where(x < 10.0, sat_low, sat_high)
         
     return sat * 100.0 # Return percentage
 
@@ -176,4 +185,26 @@ def blood_gas_calc(po2: float, pco2: float, params: BloodGasParams) -> Tuple[flo
     
     return o2_content, co2_content
 
-from typing import Tuple
+
+def inverse_blood_gas_calc(o2_content: float, co2_content: float, params: BloodGasParams) -> Tuple[float, float]:
+    """
+    Port of SUBROUTINE FTEN from VQBOHR.FOR.
+    Solves the inverse problem: Given O2 and CO2 Contents, find PO2 and PCO2.
+    Uses scipy.optimize.least_squares for robustness.
+    """
+    from scipy.optimize import least_squares
+    
+    # Objective function
+    def residuals(p):
+        po2, pco2 = p
+        calc_o2, calc_co2 = blood_gas_calc(po2, pco2, params)
+        return [calc_o2 - o2_content, calc_co2 - co2_content]
+    
+    # Initial Guess
+    p0 = [90.0, 40.0]
+    
+    # Bounds: PO2 > 0, PCO2 > 0
+    res = least_squares(residuals, p0, bounds=(0.1, np.inf), ftol=1e-4) # ftol comparable to legacy tolerance
+    
+    return res.x[0], res.x[1]
+
